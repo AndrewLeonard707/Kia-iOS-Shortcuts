@@ -149,8 +149,8 @@ def start_climate_custom():
             #rear_right_seat=None
         )
 
-    if isinstance(requested_temp, int) and requested_temp < 76:
-        climate_options.steering_wheel = 0
+        if isinstance(requested_temp, int) and requested_temp < 76:
+            climate_options.steering_wheel = 0
         
         result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
 
