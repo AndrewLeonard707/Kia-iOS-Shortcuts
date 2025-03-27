@@ -117,59 +117,48 @@ def start_climate_custom():
 
         print(f"Requested temp: {requested_temp}")
 
-        if not requested_temp or not isinstance(requested_temp, int):
+        if not requested_temp or not isinstance(requested_temp, (int, str)):
             return jsonify({"error": "Missing or invalid 'temp' value"}), 400
 
-        if requested_temp < 62:
-            requested_temp = "LOW"
-        elif requested_temp > 82:
-            requested_temp = "HIGH"
+        # Clamp or convert based on Kia rules
+        if isinstance(requested_temp, int):
+            if requested_temp < 62:
+                requested_temp = "LOW"
+            elif requested_temp > 82:
+                requested_temp = "HIGH"
 
         print("Refreshing vehicle states...")
         vehicle_manager.update_all_vehicles_with_cached_state()
 
+        # Enable heating accessories only for heating temps (e.g., 76+ or "HIGH")
         enable_heating = (
-            requested_temp == "HIGH" or (isinstance(requested_temp, int) and requested_temp >= 76)
+            requested_temp == "HIGH" or
+            (isinstance(requested_temp, int) and requested_temp >= 76)
         )
 
-        # Default seat setting: off
-        def seat_off():
-            return {
-                "heatVentType": 0,
-                "heatVentLevel": 1,
-                "heatVentStep": 0,
-            }
-
-        # Optional: high heat on driver seat only when heating
-        def seat_heat_high():
-            return {
-                "heatVentType": 1,
-                "heatVentLevel": 4,
-                "heatVentStep": 1,
-            }
-
+        # Build climate request with explicit control over accessories
         climate_options = ClimateRequestOptions(
             set_temp=requested_temp,
             duration=60,
             defrost=enable_heating,
             heating=1 if enable_heating else 0,
             steering_wheel=1 if enable_heating else 0,
+            front_left_seat=8 if enable_heating else 0,
+            front_right_seat=0,
+            rear_left_seat=0,
+            rear_right_seat=0
         )
-
-        # Explicitly set seat heaters off unless heating
-        climate_options.front_left_seat = 8 if enable_heating else 0
-        climate_options.front_right_seat = 0
-        climate_options.rear_left_seat = 0
-        climate_options.rear_right_seat = 0
 
         result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
 
         print(f"Climate start result: {result}")
         return jsonify({"status": "Climate started", "result": result}), 200
     except Exception as e:
-        print(f"Error in /start_climate_custom: {e}")
+        import traceback
+        print("Exception occurred during /start_climate_custom:")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
+        
 # Start climate endpoint
 #@app.route('/start_climate', methods=['POST'])
 #def start_climate():
