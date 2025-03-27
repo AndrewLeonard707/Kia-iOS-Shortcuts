@@ -102,33 +102,82 @@ def list_vehicles():
         print(f"Error in /list_vehicles: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Start climate endpoint
-@app.route('/start_climate', methods=['POST'])
-def start_climate():
-    print("Received request to /start_climate")
+#custom climate controls (Andrew)
+@app.route('/start_climate_custom', methods=['POST'])
+def start_climate_custom():
+    print("Received request to /start_climate_custom")
 
     if request.headers.get("Authorization") != SECRET_KEY:
         print("Unauthorized request: Missing or incorrect Authorization header")
         return jsonify({"error": "Unauthorized"}), 403
 
     try:
+        body = request.get_json()
+        requested_temp = body.get("temp")
+
+        print(f"Requested temp: {requested_temp}")
+
+        if not requested_temp or not isinstance(requested_temp, int):
+            return jsonify({"error": "Missing or invalid 'temp' value"}), 400
+
+        # Clamp or convert based on Kia rules
+        if requested_temp < 62:
+            requested_temp = "LOW"
+        elif requested_temp > 82:
+            requested_temp = "HIGH"
+
         print("Refreshing vehicle states...")
         vehicle_manager.update_all_vehicles_with_cached_state()
 
-        # Create ClimateRequestOptions object
-        climate_options = ClimateRequestOptions(
-            set_temp=72,  # Set temperature in Fahrenheit
-            duration=10   # Duration in minutes
+        # Enable heating accessories only if requested_temp is a high value
+        enable_heating = (
+            requested_temp == "HIGH" or (isinstance(requested_temp, int) and requested_temp >= 76)
         )
 
-        # Start climate control using the VehicleManager's start_climate method
-        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
-        print(f"Start climate result: {result}")
+        climate_options = ClimateRequestOptions(
+            set_temp=requested_temp,
+            duration=60,
+            defrost=enable_heating,
+            heating=1 if enable_heating else 0,
+            steering_wheel=1 if enable_heating else 0,
+            # No seat heaters/coolers by default
+        )
 
+        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
+
+        print(f"Climate start result: {result}")
         return jsonify({"status": "Climate started", "result": result}), 200
     except Exception as e:
-        print(f"Error in /start_climate: {e}")
+        print(f"Error in /start_climate_custom: {e}")
         return jsonify({"error": str(e)}), 500
+
+# Start climate endpoint
+#@app.route('/start_climate', methods=['POST'])
+#def start_climate():
+#    print("Received request to /start_climate")
+#
+#    if request.headers.get("Authorization") != SECRET_KEY:
+ #       print("Unauthorized request: Missing or incorrect Authorization header")
+ #       return jsonify({"error": "Unauthorized"}), 403
+
+ #   try:
+  #      print("Refreshing vehicle states...")
+  #      vehicle_manager.update_all_vehicles_with_cached_state()
+
+  #      # Create ClimateRequestOptions object
+  #      climate_options = ClimateRequestOptions(
+    #        set_temp=72,  # Set temperature in Fahrenheit
+   #         duration=10   # Duration in minutes
+   #     )
+#
+#        # Start climate control using the VehicleManager's start_climate method
+#        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
+#        print(f"Start climate result: {result}")
+
+#        return jsonify({"status": "Climate started", "result": result}), 200
+#    except Exception as e:
+#        print(f"Error in /start_climate: {e}")
+#        return jsonify({"error": str(e)}), 500
 
 # Stop climate endpoint
 @app.route('/stop_climate', methods=['POST'])
