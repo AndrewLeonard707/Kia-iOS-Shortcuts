@@ -120,7 +120,6 @@ def start_climate_custom():
         if not requested_temp or not isinstance(requested_temp, int):
             return jsonify({"error": "Missing or invalid 'temp' value"}), 400
 
-        # Clamp or convert based on Kia rules
         if requested_temp < 62:
             requested_temp = "LOW"
         elif requested_temp > 82:
@@ -129,10 +128,25 @@ def start_climate_custom():
         print("Refreshing vehicle states...")
         vehicle_manager.update_all_vehicles_with_cached_state()
 
-        # Enable heating accessories only if requested_temp is a high value
         enable_heating = (
             requested_temp == "HIGH" or (isinstance(requested_temp, int) and requested_temp >= 76)
         )
+
+        # Default seat setting: off
+        def seat_off():
+            return {
+                "heatVentType": 0,
+                "heatVentLevel": 1,
+                "heatVentStep": 0,
+            }
+
+        # Optional: high heat on driver seat only when heating
+        def seat_heat_high():
+            return {
+                "heatVentType": 1,
+                "heatVentLevel": 4,
+                "heatVentStep": 1,
+            }
 
         climate_options = ClimateRequestOptions(
             set_temp=requested_temp,
@@ -140,8 +154,13 @@ def start_climate_custom():
             defrost=enable_heating,
             heating=1 if enable_heating else 0,
             steering_wheel=1 if enable_heating else 0,
-            # No seat heaters/coolers by default
         )
+
+        # Explicitly set seat heaters off unless heating
+        climate_options.front_left_seat = 8 if enable_heating else 0
+        climate_options.front_right_seat = 0
+        climate_options.rear_left_seat = 0
+        climate_options.rear_right_seat = 0
 
         result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
 
