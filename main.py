@@ -143,10 +143,10 @@ def start_climate_custom():
             defrost=enable_heating,
             heating=1 if enable_heating else 0,
             steering_wheel=1 if enable_heating else 0,
-            front_left_seat=8 if enable_heating else 0,
-            front_right_seat=None,
-            rear_left_seat=None,
-            rear_right_seat=None
+            #front_left_seat=8 if enable_heating else 0,
+            #front_right_seat=None,
+            #rear_left_seat=None,
+            #rear_right_seat=None
         )
 
         result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
