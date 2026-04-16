@@ -1,10 +1,11 @@
 [project]
-name = "python-template"
-version = "0.1.0"
-description = ""
+name = "kia-ios-shortcuts"
+version = "2.0.0"
+description = "FastAPI service to control Kia/Hyundai vehicles via iOS Shortcuts"
 authors = ["Your Name <you@example.com>"]
 requires-python = ">=3.11"
 dependencies = [
-    "flask>=3.1.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
     "hyundai-kia-connect-api>=3.32.7",
 ]

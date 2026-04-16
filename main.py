@@ -1,261 +1,131 @@
+"""Kia Vehicle Control API -- FastAPI application.
+
+Provides remote control of Kia/Hyundai vehicles via the hyundai_kia_connect_api
+library, designed for deployment on Vercel and use with iOS Shortcuts.
+"""
+
 import os
-from flask import Flask, request, jsonify
-from hyundai_kia_connect_api import VehicleManager, ClimateRequestOptions
+import logging
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+
+from fastapi import FastAPI
+
+from hyundai_kia_connect_api import VehicleManager
 from hyundai_kia_connect_api.exceptions import AuthenticationError
 
-app = Flask(__name__)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-# Get credentials from environment variables
-USERNAME = os.environ.get('KIA_USERNAME')
-PASSWORD = os.environ.get('KIA_PASSWORD')
-PIN = os.environ.get('KIA_PIN')
+# ---------------------------------------------------------------------------
+# Module-level state (populated during lifespan startup)
+# ---------------------------------------------------------------------------
+vm: Optional[VehicleManager] = None
+VEHICLE_ID: Optional[str] = None
+_startup_ok: bool = False
 
-if USERNAME is None or PASSWORD is None or PIN is None:
-    raise ValueError("Missing credentials! Check your environment variables.")
 
-# Initialize Vehicle Manager
-vehicle_manager = VehicleManager(
-    region=3,  # North America region
-    brand=1,   # KIA brand
-    username=USERNAME,
-    password=PASSWORD,
-    pin=str(PIN)
+def _init_vehicle_manager() -> None:
+    """Create and authenticate the VehicleManager, select the active vehicle."""
+    global vm, VEHICLE_ID, _startup_ok  # noqa: PLW0603
+
+    username = os.environ.get("KIA_USERNAME")
+    password = os.environ.get("KIA_PASSWORD")
+    pin = os.environ.get("KIA_PIN")
+
+    if not all([username, password, pin]):
+        logger.error(
+            "Missing credentials -- set KIA_USERNAME, KIA_PASSWORD, and KIA_PIN"
+        )
+        return
+
+    vm = VehicleManager(
+        region=3,   # North America
+        brand=1,    # KIA
+        username=username,
+        password=password,
+        pin=str(pin),
+    )
+
+    try:
+        logger.info("Authenticating with Kia Connect...")
+        vm.check_and_refresh_token()
+        logger.info("Token refreshed successfully")
+        vm.update_all_vehicles_with_cached_state()
+        logger.info("Connected -- found %d vehicle(s)", len(vm.vehicles))
+    except AuthenticationError as exc:
+        logger.error("Authentication failed: %s", exc)
+        return
+    except Exception as exc:
+        logger.error("Unexpected error during init: %s", exc)
+        return
+
+    # Select vehicle
+    VEHICLE_ID = os.environ.get("VEHICLE_ID")
+    if not VEHICLE_ID:
+        if not vm.vehicles:
+            logger.error("No vehicles found in the account")
+            return
+        VEHICLE_ID = next(iter(vm.vehicles.keys()))
+        logger.info("No VEHICLE_ID set -- using first vehicle: %s", VEHICLE_ID)
+
+    _startup_ok = True
+
+
+# ---------------------------------------------------------------------------
+# FastAPI lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run startup logic (init VehicleManager), then yield to the app."""
+    _init_vehicle_manager()
+    yield
+
+
+# ---------------------------------------------------------------------------
+# App instance
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="Kia Vehicle Control API",
+    description=(
+        "Remote-control your Kia/Hyundai vehicle -- lock, unlock, climate, "
+        "charge, and status. Built for iOS Shortcuts & Vercel deployment."
+    ),
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
-# Refresh the token and update vehicle states
-try:
-    print("Attempting to authenticate and refresh token...")
-    vehicle_manager.check_and_refresh_token()
-    print("Token refreshed successfully.")
-    print("Updating vehicle states...")
-    vehicle_manager.update_all_vehicles_with_cached_state()
-    print(f"Connected! Found {len(vehicle_manager.vehicles)} vehicle(s).")
-except AuthenticationError as e:
-    print(f"Failed to authenticate: {e}")
-    exit(1)
-except Exception as e:
-    print(f"Unexpected error during initialization: {e}")
-    exit(1)
+# ---------------------------------------------------------------------------
+# Register route modules
+# ---------------------------------------------------------------------------
+from routes.lock import router as lock_router       # noqa: E402
+from routes.climate import router as climate_router  # noqa: E402
+from routes.vehicle import router as vehicle_router  # noqa: E402
+from routes.charge import router as charge_router    # noqa: E402
 
-# Secret key for security - moved to environment variables
-SECRET_KEY = os.environ.get("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("Missing SECRET_KEY environment variable.")
+app.include_router(lock_router)
+app.include_router(climate_router)
+app.include_router(vehicle_router)
+app.include_router(charge_router)
 
-# Dynamically fetch the first vehicle ID if VEHICLE_ID is not set
-VEHICLE_ID = os.environ.get("VEHICLE_ID")
-if not VEHICLE_ID:
-    if not vehicle_manager.vehicles:
-        raise ValueError("No vehicles found in the account. Please ensure your Kia account has at least one vehicle.")
-    # Fetch the first vehicle ID
-    VEHICLE_ID = next(iter(vehicle_manager.vehicles.keys()))
-    print(f"No VEHICLE_ID provided. Using the first vehicle found: {VEHICLE_ID}")
 
-# Log incoming requests
-@app.before_request
-def log_request_info():
-    print(f"Incoming request: {request.method} {request.url}")
-
-# Root endpoint
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({"status": "Welcome to the Kia Vehicle Control API"}), 200
-
-# List vehicles endpoint
-@app.route('/list_vehicles', methods=['GET'])
-def list_vehicles():
-    print("Received request to /list_vehicles")
-
-    if request.headers.get("Authorization") != SECRET_KEY:
-        print("Unauthorized request: Missing or incorrect Authorization header")
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        print("Refreshing vehicle states...")
-        vehicle_manager.update_all_vehicles_with_cached_state()
-
-        vehicles = vehicle_manager.vehicles
-        print(f"Vehicles data: {vehicles}")  # Log the vehicles data
-
-        if not vehicles:
-            print("No vehicles found in the account")
-            return jsonify({"error": "No vehicles found"}), 404
-
-        # Iterate over the dictionary values (Vehicle objects)
-        vehicle_list = [
-            {
-                "name": v.name,
-                "id": v.id,
-                "model": v.model,
-                "year": v.year
-            }
-            for v in vehicles.values()  # Use .values() to get the Vehicle objects
-        ]
-
-        if not vehicle_list:
-            print("No valid vehicles found in the account")
-            return jsonify({"error": "No valid vehicles found"}), 404
-
-        print(f"Returning vehicle list: {vehicle_list}")
-        return jsonify({"status": "Success", "vehicles": vehicle_list}), 200
-    except Exception as e:
-        print(f"Error in /list_vehicles: {e}")
-        return jsonify({"error": str(e)}), 500
-
-#custom climate controls (Andrew)
-@app.route('/start_climate_custom', methods=['POST'])
-def start_climate_custom():
-    print("Received request to /start_climate_custom")
-
-    if request.headers.get("Authorization") != SECRET_KEY:
-        print("Unauthorized request: Missing or incorrect Authorization header")
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        body = request.get_json()
-        requested_temp = body.get("temp")
-
-        print(f"Requested temp: {requested_temp}")
-
-        if not requested_temp or not isinstance(requested_temp, (int, str)):
-            return jsonify({"error": "Missing or invalid 'temp' value"}), 400
-
-        # Clamp or convert based on Kia rules
-        if isinstance(requested_temp, int):
-            if requested_temp < 62:
-                requested_temp = "LOW"
-            elif requested_temp > 82:
-                requested_temp = "HIGH"
-
-        print("Refreshing vehicle states...")
-        vehicle_manager.update_all_vehicles_with_cached_state()
-
-        # Enable heating accessories only for cold temps (<= 76 or "HIGH")
-        enable_heating = (
-            requested_temp == "HIGH" or
-            (isinstance(requested_temp, int) and requested_temp >= 76)
-        )
-
-        # Construct climate request
-        climate_options = ClimateRequestOptions(
-            set_temp=requested_temp,
-            duration=60,
-            defrost=enable_heating,
-            heating=1 if enable_heating else 0,
-            steering_wheel=1 if enable_heating else 0,
-            #front_left_seat=8 if enable_heating else 0,
-            #front_right_seat=None,
-            #rear_left_seat=None,
-            #rear_right_seat=None
-        )
-
-        if isinstance(requested_temp, int) and requested_temp < 76:
-            climate_options.steering_wheel = 0
-        
-        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
-
-        print(f"Climate start result: {result}")
-        return jsonify({"status": "Climate started", "result": result}), 200
-    except Exception as e:
-        import traceback
-        print("Exception occurred during /start_climate_custom:")
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-# Start climate endpoint
-#@app.route('/start_climate', methods=['POST'])
-#def start_climate():
-#    print("Received request to /start_climate")
-#
-#    if request.headers.get("Authorization") != SECRET_KEY:
- #       print("Unauthorized request: Missing or incorrect Authorization header")
- #       return jsonify({"error": "Unauthorized"}), 403
-
- #   try:
-  #      print("Refreshing vehicle states...")
-  #      vehicle_manager.update_all_vehicles_with_cached_state()
-
-  #      # Create ClimateRequestOptions object
-  #      climate_options = ClimateRequestOptions(
-    #        set_temp=72,  # Set temperature in Fahrenheit
-   #         duration=10   # Duration in minutes
-   #     )
-#
-#        # Start climate control using the VehicleManager's start_climate method
-#        result = vehicle_manager.start_climate(VEHICLE_ID, climate_options)
-#        print(f"Start climate result: {result}")
-
-#        return jsonify({"status": "Climate started", "result": result}), 200
-#    except Exception as e:
-#        print(f"Error in /start_climate: {e}")
-#        return jsonify({"error": str(e)}), 500
-
-# Stop climate endpoint
-@app.route('/stop_climate', methods=['POST'])
-def stop_climate():
-    print("Received request to /stop_climate")
-
-    if request.headers.get("Authorization") != SECRET_KEY:
-        print("Unauthorized request: Missing or incorrect Authorization header")
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        print("Refreshing vehicle states...")
-        vehicle_manager.update_all_vehicles_with_cached_state()
-
-        # Stop climate control using the VehicleManager's stop_climate method
-        result = vehicle_manager.stop_climate(VEHICLE_ID)
-        print(f"Stop climate result: {result}")
-
-        return jsonify({"status": "Climate stopped", "result": result}), 200
-    except Exception as e:
-        print(f"Error in /stop_climate: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# Unlock car endpoint
-@app.route('/unlock_car', methods=['POST'])
-def unlock_car():
-    print("Received request to /unlock_car")
-
-    if request.headers.get("Authorization") != SECRET_KEY:
-        print("Unauthorized request: Missing or incorrect Authorization header")
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        print("Refreshing vehicle states...")
-        vehicle_manager.update_all_vehicles_with_cached_state()
-
-        # Unlock the vehicle using the VehicleManager's unlock method
-        result = vehicle_manager.unlock(VEHICLE_ID)
-        print(f"Unlock result: {result}")
-
-        return jsonify({"status": "Car unlocked", "result": result}), 200
-    except Exception as e:
-        print(f"Error in /unlock_car: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# Lock car endpoint
-@app.route('/lock_car', methods=['POST'])
-def lock_car():
-    print("Received request to /lock_car")
-
-    if request.headers.get("Authorization") != SECRET_KEY:
-        print("Unauthorized request: Missing or incorrect Authorization header")
-        return jsonify({"error": "Unauthorized"}), 403
-
-    try:
-        print("Refreshing vehicle states...")
-        vehicle_manager.update_all_vehicles_with_cached_state()
-
-        # Lock the vehicle using the VehicleManager's lock method
-        result = vehicle_manager.lock(VEHICLE_ID)
-        print(f"Lock result: {result}")
-
-        return jsonify({"status": "Car locked", "result": result}), 200
-    except Exception as e:
-        print(f"Error in /lock_car: {e}")
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    print("Starting Kia Vehicle Control API...")
-    app.run(host="0.0.0.0", port=8080)
+# ---------------------------------------------------------------------------
+# Health check (no auth required)
+# ---------------------------------------------------------------------------
+@app.get("/", tags=["Health"])
+def health_check() -> dict[str, Any]:
+    """Health check -- always responds, even if vehicle auth failed."""
+    return {
+        "status": "ok" if _startup_ok else "degraded",
+        "message": (
+            "Kia Vehicle Control API is running"
+            if _startup_ok
+            else "API is running but vehicle connection failed -- check credentials"
+        ),
+    }
